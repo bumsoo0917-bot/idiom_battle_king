@@ -61,91 +61,83 @@ export const createGame = async (title, teamCount) => {
   };
 };
 
-// 2. Join game room (Atomic Transaction to prevent race conditions in team assignment)
+// 2. Join game room
 export const joinGame = async (gameCode, nickname) => {
   const cleanCode = gameCode.trim().toUpperCase();
   const cleanNickname = nickname.trim();
-  const roomRef = ref(db, `rooms/${cleanCode}`);
 
-  let resultStudent = null;
-
-  await runTransaction(roomRef, (room) => {
-    if (!room) return; // Room doesn't exist
-    if (room.status !== 'WAITING') return; // Game already running/ended
-
-    // Verify duplicate nickname
-    const students = room.students || {};
-    const exists = Object.values(students).some(s => s.nickname === cleanNickname);
-    if (exists) {
-      throw new Error('DUPLICATE_NICKNAME');
-    }
-
-    // Auto-balance: Assign to team with fewest students
-    const teams = room.teams || {};
-    const teamIds = Object.keys(teams);
-    if (teamIds.length === 0) return;
-
-    // Calculate student count per team
-    const teamCounts = {};
-    teamIds.forEach(id => {
-      teamCounts[id] = 0;
-    });
-
-    Object.values(students).forEach(s => {
-      if (s.team_id && teamCounts[s.team_id] !== undefined) {
-        teamCounts[s.team_id]++;
-      }
-    });
-
-    // Find team with min count
-    let minTeamId = teamIds[0];
-    let minCount = teamCounts[minTeamId];
-
-    teamIds.forEach(id => {
-      if (teamCounts[id] < minCount) {
-        minTeamId = id;
-        minCount = teamCounts[id];
-      }
-    });
-
-    const assignedTeam = teams[minTeamId];
-    
-    // Generate new student ID
-    const studentId = 'student_' + Math.random().toString(36).substr(2, 9);
-    const newStudent = {
-      student_id: studentId,
-      game_id: cleanCode,
-      nickname: cleanNickname,
-      team_id: minTeamId,
-      score: 0,
-      correct_count: 0,
-      streak_count: 0,
-      created_at: new Date().toISOString()
-    };
-
-    if (!room.students) {
-      room.students = {};
-    }
-    room.students[studentId] = newStudent;
-
-    resultStudent = {
-      student_id: studentId,
-      game_id: cleanCode,
-      nickname: cleanNickname,
-      team_id: minTeamId,
-      team_name: assignedTeam.team_name,
-      team_color: assignedTeam.team_color,
-      game_code: cleanCode
-    };
-
-    return room;
-  });
-
-  if (!resultStudent) {
-    throw new Error('대기 중인 게임방을 찾을 수 없거나 이미 진행 중입니다.');
+  // Fetch room details
+  const roomSnapshot = await get(ref(db, `rooms/${cleanCode}`));
+  if (!roomSnapshot.exists()) {
+    throw new Error('대기 중인 게임방을 찾을 수 없습니다. 코드를 확인해주세요.');
   }
 
-  return resultStudent;
+  const room = roomSnapshot.val();
+  if (room.status !== 'WAITING') {
+    throw new Error('이미 진행 중이거나 종료된 게임방입니다.');
+  }
+
+  // Verify duplicate nickname
+  const students = room.students || {};
+  const exists = Object.values(students).some(s => s.nickname === cleanNickname);
+  if (exists) {
+    throw new Error('이미 사용 중인 닉네임입니다. 다른 닉네임을 선택해주세요.');
+  }
+
+  // Auto-balance: Assign to team with fewest students
+  const teams = room.teams || {};
+  const teamIds = Object.keys(teams);
+  if (teamIds.length === 0) {
+    throw new Error('팀이 존재하지 않는 게임방입니다.');
+  }
+
+  const teamCounts = {};
+  teamIds.forEach(id => {
+    teamCounts[id] = 0;
+  });
+
+  Object.values(students).forEach(s => {
+    if (s.team_id && teamCounts[s.team_id] !== undefined) {
+      teamCounts[s.team_id]++;
+    }
+  });
+
+  let minTeamId = teamIds[0];
+  let minCount = teamCounts[minTeamId];
+
+  teamIds.forEach(id => {
+    if (teamCounts[id] < minCount) {
+      minTeamId = id;
+      minCount = teamCounts[id];
+    }
+  });
+
+  const assignedTeam = teams[minTeamId];
+  const studentId = 'student_' + Math.random().toString(36).substr(2, 9);
+  
+  const newStudent = {
+    student_id: studentId,
+    game_id: cleanCode,
+    nickname: cleanNickname,
+    team_id: minTeamId,
+    score: 0,
+    correct_count: 0,
+    streak_count: 0,
+    created_at: new Date().toISOString()
+  };
+
+  // Write new student to database
+  await set(ref(db, `rooms/${cleanCode}/students/${studentId}`), newStudent);
+
+  return {
+    student_id: studentId,
+    game_id: cleanCode,
+    nickname: cleanNickname,
+    team_id: minTeamId,
+    team_name: assignedTeam.team_name,
+    team_color: assignedTeam.team_color,
+    game_code: cleanCode
+  };
 };
 
 // 3. Get room details
